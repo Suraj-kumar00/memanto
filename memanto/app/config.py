@@ -124,6 +124,9 @@ class Settings(BaseSettings):
     # Schedule Configuration
     MEMANTO_SCHEDULE_TIME: str = "23:55"
 
+    # Auto Parsing Configuration
+    AUTO_PARSE_ENABLED: bool = True
+
     # UI Mode
     MEMANTO_UI_MODE: bool = False
 
