@@ -18,6 +18,7 @@ import hashlib
 import html
 import os
 import time
+import uuid
 from pathlib import Path
 
 import streamlit as st
@@ -65,6 +66,7 @@ def _run(coro, *, pool: concurrent.futures.ThreadPoolExecutor, timeout: float = 
 
 
 async def _invoke(graph, thread_id: str, user_msg: str, user_id: str) -> str:
+    """Run one turn of the graph and return the assistant's reply as text."""
     result = await graph.ainvoke(
         {"messages": [HumanMessage(content=user_msg)]},
         config={"configurable": {"thread_id": thread_id, "user_id": user_id}},
@@ -79,6 +81,7 @@ async def _invoke(graph, thread_id: str, user_msg: str, user_id: str) -> str:
 
 
 async def _fetch_memories(store, user_id: str):
+    """Return up to 20 memories under ``(user_id, "memories")`` for the panel."""
     return await store.asearch((user_id, "memories"), query="*", limit=20)
 
 
@@ -119,6 +122,12 @@ def _graph_hash() -> str:
 
 @st.cache_resource(show_spinner="Connecting to Memanto...")
 def _load(_graph_version: str = ""):
+    """Set up Memanto + compile the graph once per ``_graph_version`` value.
+
+    ``_graph_version`` is a hash of ``graph.py``; changing it busts the
+    cache so edits to graph.py take effect on the next Streamlit rerun
+    without a manual server restart.
+    """
     from graph import build_support_graph
     from memanto_setup import MemantoSetup
     from memanto_store import MemantoStore
@@ -159,13 +168,15 @@ graph, store = _load(_graph_version=_graph_hash())
 def _init_session(ts: str | None = None) -> None:
     """Initialise (or reset) all demo-scoped session state.
 
-    A fresh timestamp suffix is used on every call so each Streamlit
-    browser session and every explicit reset starts with a clean
-    memory namespace. Cross-session recall is proven within the same
-    running Streamlit session (Session 1 tab -> Session 2 tab), not
-    across app restarts.
+    A fresh suffix (timestamp + 4-char uuid) is used on every call so
+    each Streamlit browser session and every explicit reset starts with
+    a clean memory namespace. The uuid component guarantees two rapid
+    "Reset demo" clicks within the same second still get distinct
+    namespaces. Cross-session recall is proven within the same running
+    Streamlit session (Session 1 tab -> Session 2 tab), not across app
+    restarts.
     """
-    suffix = ts or str(int(time.time()))
+    suffix = ts or f"{int(time.time())}-{uuid.uuid4().hex[:4]}"
     st.session_state.user_id = f"bob-{suffix}"
     st.session_state.s1_thread = f"streamlit-s1-{suffix}"
     st.session_state.s2_thread = f"streamlit-s2-{suffix}"
@@ -208,7 +219,9 @@ with st.sidebar:
         st.session_state.s2 = []
     st.caption("Clears the chat UI only. Stored memories persist.")
     if st.button("♻️ Reset demo (fresh memory namespace)", use_container_width=True):
-        _init_session(str(int(time.time())))
+        # Pass None so _init_session generates a fresh timestamp+uuid suffix;
+        # passing a fixed timestamp here would let two rapid clicks collide.
+        _init_session()
         st.rerun()
     st.caption(
         "Switches to a new user namespace so the next run starts with zero memories. "
@@ -272,7 +285,15 @@ with mem_col:
                 )
                 st.markdown(f"> {content}")
                 if conf is not None:
-                    st.progress(float(conf), text=f"confidence {float(conf):.0%}")
+                    # Clamp + try/except: Memanto could in principle return a
+                    # confidence outside [0, 1] or a non-numeric value; st.progress
+                    # throws on either, which would break the whole memory panel
+                    # render. Defensive coercion keeps the UI alive.
+                    try:
+                        clamped = max(0.0, min(1.0, float(conf)))
+                        st.progress(clamped, text=f"confidence {clamped:.0%}")
+                    except (TypeError, ValueError):
+                        pass
 
 # ── Chat ──────────────────────────────────────────────────────────────────────
 
@@ -283,6 +304,7 @@ with chat_col:
     ])
 
     def _render_history(msgs: list) -> None:
+        """Render a list of ``(role, text)`` tuples as Streamlit chat bubbles."""
         for role, text in msgs:
             with st.chat_message(role):
                 st.markdown(text)

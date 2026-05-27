@@ -151,9 +151,14 @@ def _parse_memories_response(response) -> ExtractedMemories:
             p.get("text", "") if isinstance(p, dict) else str(p) for p in text
         )
 
+    # Raw model output can contain user-sensitive content (emails, health
+    # facts, contact preferences). Log at DEBUG so it's available when a
+    # developer opts in but not emitted by default to INFO log sinks.
     logger.info(
-        "_parse_memories_response: raw model output (%d chars):\n%s",
-        len(text),
+        "_parse_memories_response: model returned %d chars", len(text)
+    )
+    logger.debug(
+        "_parse_memories_response: raw model output:\n%s",
         text[:1500] + ("...[truncated]" if len(text) > 1500 else ""),
     )
 
@@ -309,9 +314,25 @@ def _default_llm() -> ChatOpenAI:
 
 
 def _user_id_from_config(config) -> str:
+    """Extract user_id from LangGraph runnable config; raise if missing.
+
+    Memories are namespaced by user_id, so silently defaulting to a shared
+    sentinel like "anonymous" would merge unrelated users' memories together
+    and leak recalled context across sessions. The demo invokers always
+    supply user_id explicitly via ``config={"configurable": {"user_id": ...}}``.
+    """
     if not config:
-        return "anonymous"
-    return config.get("configurable", {}).get("user_id", "anonymous")
+        raise ValueError(
+            "graph invocation is missing config; pass "
+            'config={"configurable": {"thread_id": "...", "user_id": "..."}}'
+        )
+    user_id = config.get("configurable", {}).get("user_id")
+    if not user_id:
+        raise ValueError(
+            "graph invocation is missing configurable.user_id; "
+            "memories are user-scoped and cannot fall back to a shared default"
+        )
+    return user_id
 
 
 def build_support_graph(

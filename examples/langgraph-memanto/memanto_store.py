@@ -102,6 +102,12 @@ class MemantoStore(BaseStore):
     """
 
     def __init__(self, client: SdkClient, agent_id: str) -> None:
+        """Wrap an active Memanto ``SdkClient`` as a LangGraph ``BaseStore``.
+
+        ``client`` must have an active session for ``agent_id`` (call
+        ``MemantoSetup.setup(agent_id)`` first). ``agent_id`` scopes every
+        ``remember``/``recall`` call this store issues.
+        """
         self._client = client
         self._agent_id = agent_id
         # (namespace, query, limit) -> (timestamp, list[SearchItem])
@@ -132,6 +138,7 @@ class MemantoStore(BaseStore):
     # ------------------------------------------------------------------ #
 
     def _dispatch_one(self, op: Any) -> Any:
+        """Route a single BaseStore op to its dedicated handler."""
         if isinstance(op, GetOp):
             return self._do_get(op)
         if isinstance(op, PutOp):
@@ -147,14 +154,21 @@ class MemantoStore(BaseStore):
     # ------------------------------------------------------------------ #
 
     def _do_get(self, op: GetOp) -> Item | None:
-        """Lookup-by-key, implemented via tag-filtered recall."""
+        """Lookup-by-key, implemented via tag-filtered recall.
+
+        Memanto's recall is semantic search with OR-matching on tags, so
+        the exact-key memory we're looking for may not be in the top-10
+        by similarity to ``op.key`` when the namespace contains many
+        similar items. We over-fetch up to the recall cap and then apply
+        a strict AND-match on the namespace + key tags client-side.
+        """
         ns_tags = self._namespace_to_tags(op.namespace)
         key_tag = self._key_to_tag(op.key)
 
         result = self._client.recall(
             agent_id=self._agent_id,
             query=op.key or "*",
-            limit=10,
+            limit=self._MEMANTO_RECALL_CAP,
             tags=ns_tags + [key_tag],
         )
 
@@ -170,6 +184,7 @@ class MemantoStore(BaseStore):
     # ------------------------------------------------------------------ #
 
     def _do_put(self, op: PutOp) -> None:
+        """Persist a ``PutOp.value`` as a Memanto memory under the ns + key tags."""
         if op.value is None:
             raise NotImplementedError(
                 "MemantoStore does not support delete via PutOp(value=None). "
@@ -292,8 +307,19 @@ class MemantoStore(BaseStore):
 
         # Cache hit? Returning a recent result avoids hammering Memanto's
         # rate limit when the UI polls or multiple graph nodes search the
-        # same namespace in quick succession.
-        cache_key = (op.namespace_prefix, query, op.limit, tuple(extra_tags))
+        # same namespace in quick succession. The cache key includes every
+        # filter that changes the result set, otherwise two distinct
+        # searches (e.g. one filtered to kind="preference" and one
+        # unfiltered) would alias to the same entry and the second caller
+        # would receive the wrong result.
+        cache_key = (
+            op.namespace_prefix,
+            query,
+            op.limit,
+            tuple(extra_tags),
+            tuple(type_filter) if type_filter else None,
+            min_conf,
+        )
         cached = self._search_cache.get(cache_key)
         if cached is not None:
             ts, items = cached
@@ -393,10 +419,21 @@ class MemantoStore(BaseStore):
     # ------------------------------------------------------------------ #
 
     def _do_list_namespaces(self, op: ListNamespacesOp) -> list[tuple[str, ...]]:
-        # Sample generously (at least 200) so we cover all namespaces, then
-        # truncate the *output* to op.limit. op.limit controls what the caller
-        # sees, not how many memories we query.
-        sample_limit = max(op.limit or 0, 200)
+        """Best-effort namespace listing.
+
+        Samples up to Memanto's server cap (100) and derives unique
+        namespaces from the returned memories' tags. Truncates output to
+        ``op.limit`` if set. ``op.limit`` controls what the caller sees,
+        not how many memories we query - we always ask for the full cap
+        to maximise coverage.
+        """
+        # Memanto's recall is hard-capped at 100 server-side and raises
+        # ValueError("Limit must be between 1 and 100") above that. Never
+        # request more.
+        sample_limit = min(
+            max(op.limit or 0, self._MEMANTO_RECALL_CAP),
+            self._MEMANTO_RECALL_CAP,
+        )
         sample = self._client.recall(
             agent_id=self._agent_id,
             query="*",
