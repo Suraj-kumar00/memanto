@@ -1,8 +1,6 @@
 ---
-type: Metrics
-title: overview
-generated:
-  by: memanto-liberate/1.0
+type: Metrics Overview
+title: Aggregate Metrics
 ---
 
 # Metrics — aggregate
@@ -27,14 +25,14 @@ Hour  00  03  06  09  12  15  18  21  24
 ### Memory Type Distribution
 
 ```
-LEARNING     ████████████████████ 3
 PREFERENCE   ████████████████████ 3
+LEARNING     ████████████████████ 3
 CONTEXT      █████████████ 2
-OBSERVATION  ███████ 1
-DECISION     ███████ 1
-ARTIFACT     ███████ 1
-GOAL         ███████ 1
 FACT         ███████ 1
+DECISION     ███████ 1
+GOAL         ███████ 1
+OBSERVATION  ███████ 1
+ARTIFACT     ███████ 1
 ```
 
 ### Confidence Overview
@@ -47,5 +45,5 @@ FACT         ███████ 1
 | Medium (0.5–0.8)| 0     |
 | Low (<0.5)      | 0     |
 
-*Visualizations auto-generated at Aug 22, 2026 03:21 PM*
+*Visualizations auto-generated at Sep 13, 2026 11:40 PM*
 

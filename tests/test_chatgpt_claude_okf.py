@@ -5,7 +5,7 @@ The adapter lives in ``examples/migrations/chatgpt-claude-okf/``. These tests
 sit here rather than beside it so the repository test suite actually runs them.
 
 They cover the only parts of the pipeline the example owns: parsing two vendor
-export formats, the OKF v0.2 upgrade layer, the privacy filter, and the one
+export formats, the privacy filter, the bundle round trip, and the one
 destructive operation. Everything else is a shipped Memanto service with its
 own tests upstream.
 
@@ -31,7 +31,6 @@ _ADAPTER = (
 )
 sys.path.insert(0, str(_ADAPTER))
 
-import okf_v02  # noqa: E402
 from liberate import (  # noqa: E402
     _clear_stale_bundle,
     _parse_dt,
@@ -323,11 +322,15 @@ class TestVerifyLinks:
         assert verify_links(bundle) == []
 
 
-class TestOkfV02:
-    """Spec v0.2 upgrade layered over memanto's v0.1 exporter."""
+class TestBundleRoundTrip:
+    """The bundle is OKF v0.2 by construction: the shipped exporter has emitted
+    v0.2 since #1896, so the example writes nothing after ``write_bundle``."""
 
-    def _bundle(self, tmp_path: Path, timestamp: str | None) -> tuple[Path, list]:
-        """Build a small bundle on disk from the given documents."""
+    def test_bundle_is_v02_and_round_trips(self, tmp_path):
+        """The source date must survive the trip out to markdown and back in."""
+        from memanto.cli.migrate.mappers import map_okf
+        from memanto.cli.migrate.okf_loader import load_okf_bundle
+
         record = {
             "id": "abc-123",
             "title": "A preference",
@@ -335,95 +338,27 @@ class TestOkfV02:
             "type": "preference",
             "confidence": 0.9,
             "tags": ["chatgpt"],
-            "created_at": timestamp,
+            "created_at": "2026-02-01T00:00:00+00:00",
             "source": "chatgpt",
             "source_ref": "conv-9",
-            "source_title": "A conversation",
             "provenance": "imported",
             "status": "active",
         }
         bundle = tmp_path / "okf"
         write_bundle([record], bundle, "test-agent")
-        return bundle, [record]
 
-    def _doc(self, bundle: Path) -> dict[str, Any]:
-        """Frontmatter of the one concept document, parsed the way the module
-        itself parses it, since a body may legally contain `---` rules."""
-        path = next(
-            p for p in (bundle / "memories").rglob("*.md") if p.name != "index.md"
-        )
-        # okf_v02 lives under examples/, which mypy does not analyse, so the
-        # return is Any here and needs an explicit annotation.
-        frontmatter: dict[str, Any] = okf_v02._split(path.read_text(encoding="utf-8"))[
-            0
-        ]
-        return frontmatter
+        # Spec 12: the version is declared once, at the bundle root.
+        assert 'okf_version: "0.2"' in (bundle / "index.md").read_text(encoding="utf-8")
 
-    def test_adds_generated_by_actor(self, tmp_path):
-        """Spec 5.2 requires `generated.by`, written in the actor convention of section 7."""
-        bundle, records = self._bundle(tmp_path, "2026-02-01T00:00:00+00:00")
-        okf_v02.upgrade(bundle, records, "memanto-liberate/1.0")
-        assert self._doc(bundle)["generated"]["by"] == "memanto-liberate/1.0"
-
-    def test_generated_at_mirrors_timestamp_for_determinism(self, tmp_path):
-        """Reusing the source date keeps v0.1 and v0.2 consumers in agreement and
-        stops re-runs churning committed bundles."""
-        bundle, records = self._bundle(tmp_path, "2026-02-01T00:00:00+00:00")
-        okf_v02.upgrade(bundle, records, "p/1")
-        doc = self._doc(bundle)
-        assert doc["generated"]["at"] == doc["timestamp"]
-
-    def test_generated_at_omitted_when_source_has_no_date(self, tmp_path):
-        """The spec requires only `by`; inventing a date would be worse."""
-        bundle, records = self._bundle(tmp_path, None)
-        okf_v02.upgrade(bundle, records, "p/1")
-        assert "at" not in self._doc(bundle)["generated"]
-
-    def test_sources_points_back_at_the_conversation(self, tmp_path):
-        """Spec 5.1 provenance, so a reader can tell which conversation a memory came from."""
-        bundle, records = self._bundle(tmp_path, None)
-        okf_v02.upgrade(bundle, records, "p/1")
-        source = self._doc(bundle)["sources"][0]
-        assert source["id"] == "chatgpt:conv-9"
-        assert source["title"] == "A conversation"
-
-    def test_root_index_declares_okf_version(self, tmp_path):
-        """Spec 12 requires the declaration, and section 8 permits frontmatter only at the bundle root."""
-        bundle, records = self._bundle(tmp_path, None)
-        okf_v02.upgrade(bundle, records, "p/1")
-        front, _ = okf_v02._split((bundle / "index.md").read_text(encoding="utf-8"))
-        assert front == {"okf_version": "0.2"}
-
-    def test_non_root_index_carries_no_frontmatter(self, tmp_path):
-        """Spec section 8 permits frontmatter in an index only at the bundle root."""
-        bundle, records = self._bundle(tmp_path, None)
-        okf_v02.upgrade(bundle, records, "p/1")
-        for index in bundle.rglob("index.md"):
-            if index.parent != bundle:
-                assert not index.read_text().startswith("---")
-
-    def test_every_non_reserved_doc_has_a_type(self, tmp_path):
-        """Conformance rule 1. Memanto emits metrics/overview.md with no
-        frontmatter at all, which fails it until this layer runs."""
-        bundle, records = self._bundle(tmp_path, None)
-        okf_v02.upgrade(bundle, records, "p/1")
-        for doc in bundle.rglob("*.md"):
-            if doc.name in okf_v02.RESERVED:
-                continue
-            frontmatter, _ = okf_v02._split(doc.read_text(encoding="utf-8"))
-            assert frontmatter.get("type"), f"{doc} has no type"
-
-    def test_upgraded_bundle_still_imports_through_memanto(self, tmp_path):
-        """The whole point: v0.2 output must stay readable by the shipped v0.1 loader."""
-        from memanto.cli.migrate.okf_loader import load_okf_bundle
-
-        bundle, records = self._bundle(tmp_path, "2026-02-01T00:00:00+00:00")
-        okf_v02.upgrade(bundle, records, "memanto-liberate/1.0")
         loaded = load_okf_bundle(bundle)["memories"]
         assert len(loaded) == 1
-        # Unknown v0.2 keys must be preserved, not dropped (spec section 4.1).
-        assert "generated" in loaded[0]["extra"]
-        assert "sources" in loaded[0]["extra"]
+        # Spec 5.2: the date travels as `generated.at`, which the loader keeps
+        # as an unknown key and the mapper reads back into `created_at`.
+        assert loaded[0]["extra"]["generated"]["at"] == record["created_at"]
+        row = map_okf({"memories": loaded})[0]
+        assert row["created_at"].isoformat() == record["created_at"]
+        assert row["type"] == "preference"
+        assert row["source"] == "chatgpt"
 
 
 class TestExcludeMatching:
@@ -511,16 +446,6 @@ class TestHostileInput:
         with pytest.raises(SystemExit) as exc:
             exclude_matching([{"title": "a", "content": "b", "type": "fact"}], "([un")
         assert "Invalid exclusion pattern" in str(exc.value)
-
-    def test_malformed_yaml_in_a_document_is_tolerated(self, tmp_path):
-        """OKF section 11: a consumer must not reject a bundle for one bad doc."""
-        bundle = tmp_path / "okf"
-        (bundle / "memories").mkdir(parents=True)
-        (bundle / "memories" / "broken.md").write_text(
-            "---\n: : bad yaml :\n---\nbody\n"
-        )
-        counts = okf_v02.upgrade(bundle, [], "p/1")
-        assert counts["documents"] >= 1
 
     def test_conversation_with_null_mapping_is_skipped(self, tmp_path):
         """A null mapping is skipped rather than dereferenced."""
@@ -759,22 +684,6 @@ class TestReviewFixes:
             )
         )
         assert list(read_claude(path)) == []
-
-    def test_source_entry_carries_a_required_resource(self):
-        """OKF v0.2 section 5.1 makes resource REQUIRED on every entry."""
-        entry = okf_v02._source_entry(
-            {"source_ref": "abc123", "source": "chatgpt", "source_title": "T"}
-        )
-        assert entry is not None
-        assert entry["resource"] == "conversation abc123 in a chatgpt data export"
-
-    def test_saved_memory_source_entry_describes_its_scope(self):
-        """Pasted memories have no conversation, so the resource is a scope descriptor instead."""
-        entry = okf_v02._source_entry(
-            {"source_ref": "claude:saved-memories", "source": "claude"}
-        )
-        assert entry is not None
-        assert entry["resource"] == "saved memory list pasted from claude"
 
 
 class TestParseVerdict:

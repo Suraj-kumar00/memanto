@@ -40,8 +40,6 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple
 
-import okf_v02  # noqa: E402  (local module, sits beside this file)
-
 from memanto.app.core import MemoryRecord
 from memanto.app.services.conversation_memory_extraction_service import (
     ConversationMemoryExtractionService as Extractor,
@@ -50,11 +48,6 @@ from memanto.app.services.memory_parsing_service import MemoryParsingService
 from memanto.app.services.okf_export_service import OkfExportService
 from memanto.cli.client.sdk_client import SdkClient
 from memanto.cli.commands._shared import get_client
-
-# Actor string for OKF v0.2 `generated.by`, per spec section 7. Deliberately a
-# stable adapter version rather than memanto's build version, which carries a
-# git hash and would churn committed bundles on every upstream commit.
-PRODUCER = "memanto-liberate/1.0"
 
 
 class Conversation(NamedTuple):
@@ -295,7 +288,6 @@ def _record(
     memory_type: str,
     source: str,
     source_ref: str,
-    source_title: str,
     created_at: datetime | None,
     confidence: float,
 ) -> dict[str, Any]:
@@ -310,7 +302,6 @@ def _record(
         "created_at": created_at.isoformat() if created_at else None,
         "source": source,
         "source_ref": source_ref,
-        "source_title": source_title,
         "provenance": "imported",
         "status": "active",
     }
@@ -356,7 +347,6 @@ def distill(
                     memory_type=candidate.get("type") or "fact",
                     source=source,
                     source_ref=conv.id,
-                    source_title=conv.title,
                     created_at=conv.created_at,
                     confidence=float(candidate.get("confidence") or 0.8),
                 )
@@ -393,7 +383,6 @@ def classify_saved(path: Path, source: str) -> list[dict[str, Any]]:
                 memory_type=parsed.type or "fact",
                 source=source,
                 source_ref=f"{source}:saved-memories",
-                source_title="Saved memories, pasted from the assistant settings",
                 created_at=None,
                 confidence=0.9,
             )
@@ -537,12 +526,6 @@ def main() -> int:
         "line ends up in your shell history and in any captured log.",
     )
     parser.add_argument(
-        "--okf-version",
-        choices=["0.1", "0.2"],
-        default="0.2",
-        help="OKF spec revision to emit (default 0.2; 0.1 matches memanto's exporter)",
-    )
-    parser.add_argument(
         "--inspect",
         action="store_true",
         help="Report what an export contains, then exit (no writes, no API, no key)",
@@ -653,13 +636,6 @@ def main() -> int:
         return 1
 
     result = write_bundle(records, args.out, args.out.name)
-
-    if args.okf_version == "0.2":
-        counts = okf_v02.upgrade(args.out, records, PRODUCER)
-        print(
-            f"OKF v0.2: upgraded {counts['documents']} document(s), "
-            f"rewrote {counts['indexes']} index file(s)"
-        )
 
     broken = verify_links(args.out)
     if broken:

@@ -26,7 +26,7 @@ portable, for the memory that was previously the hardest to move.
 
 ## Architecture
 
-![ChatGPT and Claude exports flow through liberate.py, a privacy filter and okf_v02.py, into three shipped Memanto services, out to an OKF bundle, and through memanto migrate okf into the store, which MCP clients, your own agents and git can then read](architecture.png)
+![ChatGPT and Claude exports flow through liberate.py and a privacy filter, into three shipped Memanto services, out to an OKF bundle, and through memanto migrate okf into the store, which MCP clients, your own agents and git can then read](architecture.png)
 
 Band 2 is ours, and it is the entire diff. Band 3 already shipped: the adapter
 adds no CLI command and reimplements no import logic, so `migrate okf` remains
@@ -121,43 +121,25 @@ Re-running is safe: the bundle directory is rebuilt from scratch each time, and
 double-count. Both matter because extraction is non-deterministic, the same
 conversation can yield differently-titled memories on a second pass.
 
-## OKF v0.2 conformance
+## OKF v0.2
 
-Memanto's exporter targets OKF **v0.1**. The specification moved to
+The bundle is OKF
 [v0.2](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)
-on 24 July 2026. This example emits v0.2 by default and upgrades the bundle
-*after* `OkfExportService` has written it, so the structure, slugs, stacking and
-index bodies remain Memanto's own. Only frontmatter changes.
+by construction. Since [#1896](https://github.com/moorcheh-ai/memanto/pull/1896)
+`OkfExportService` declares `okf_version: "0.2"` at the bundle root, carries the
+source date as `generated: { by, at }`, and keeps frontmatter out of every other
+`index.md`. Nothing here rewrites the bundle after the exporter has written it,
+so the output is the same serializer, and the same shape, as
+`memanto memory export --okf`.
 
-| Spec | What v0.1 output does | What this adds |
-|---|---|---|
-| Section 5.2 trust | `timestamp` only | `generated: { by, at }`, retaining `timestamp` for v0.1 readers |
-| Section 5.1 provenance | none | `sources`, pointing back at the conversation or file each memory came from |
-| Section 8 index files | frontmatter in every `index.md` | frontmatter only at the bundle root, and only `okf_version` |
-| Section 11 rule 1 | `metrics/overview.md` has no frontmatter | given a `type`, so every non-reserved document is conformant |
-| Section 12 versioning | never declared | `okf_version: "0.2"` at the bundle root |
+`generated.by` is `process:chatgpt` or `process:claude`, the assistant the
+memory was distilled from. `generated.at` is the source conversation's own date
+rather than the moment the bundle was built, so re-running does not churn
+committed artifacts. Saved memories carry no date, so they carry no `generated`
+block.
 
-The three v0.1 gaps in that table are reported upstream as
-[#1889](https://github.com/moorcheh-ai/memanto/issues/1889). They are fixed here
-in this example's own output, not in `OkfExportService`, so nothing outside this
-folder changes.
-
-Two deliberate choices worth knowing:
-
-`generated.at` reuses the memory's own source date rather than the moment the
-bundle was built. That keeps a v0.1 and a v0.2 reader agreeing on the same date,
-and it stops re-runs churning committed artifacts. Where the source carries no
-date, the key is omitted rather than invented: the spec requires only
-`generated.by`.
-
-`status` is not emitted. The spec states that an absent `status` means `stable`,
-so writing it would add bytes and no information.
-
-Pass `--okf-version 0.1` to emit exactly what Memanto's exporter produces.
-
-Everything added here is an unknown key to Memanto's importer, which preserves
-unknown frontmatter in a `[Supporting data]` footer rather than dropping it. The
-round trip is therefore lossless in both directions, and there is a test for it.
+On import, `migrate okf` reads `generated.at` back into `created_at`. There is a
+round-trip test for it.
 
 ## Mapping table
 
@@ -168,8 +150,8 @@ round trip is therefore lossless in both directions, and there is a test for it.
 | Extracted memory type | `type` (one of the 13) | `type`, and `x_memanto.type` |
 | Extractor confidence | `confidence` | `x_memanto.confidence` |
 | Conversation id | `source_ref` | `resource` |
-| Conversation `create_time` / `created_at` | `created_at` | `timestamp` |
-| `chatgpt` \| `claude` | `source` | `x_memanto.source` |
+| Conversation `create_time` / `created_at` | `created_at` | `generated.at` |
+| `chatgpt` \| `claude` | `source` | `generated.by` (as `process:<source>`), and `x_memanto.source` |
 | set by the adapter | `provenance: imported` | `x_memanto.provenance` |
 
 Because the type travels in `x_memanto.type`, the importer uses it directly
